@@ -1,6 +1,6 @@
 # Painel para análise de regressão com transformações
-# Autores: Carlo e Eguiberto
-# Data: 01/04/2025
+# Autores: Carlo Ralph De Musis e Eguiberto Bernardes Fraga Júnior
+# Data: 02/04/2025
 
 library(shiny)
 library(readxl)
@@ -24,13 +24,14 @@ ui <- fluidPage(
       actionButton("rodar", "Executar Análises"),
       hr(),
       
-      # Slider para o número de reamostragens do bootstrap
+      # Slider para o número de reamostragens do bootstrap (tanto para IC dos coeficientes 
+      # como para repetição de holdout)
       sliderInput(
         inputId = "num_boot",
-        label = "Número de reamostragens (bootstrap):",
+        label = "Número de repetições:",
         min = 100,
         max = 10000,
-        value = 1000,
+        value = 300,
         step = 100
       ),
       hr(),
@@ -39,7 +40,7 @@ ui <- fluidPage(
       checkboxInput("robusto", "Usar regressão robusta?", value = FALSE),
       hr(),
       
-      # Slider para definir a fração de dados de treino (holdout)
+      # Slider para definir a fração de dados de treino (holdout) em cada repetição
       sliderInput(
         inputId = "frac_treino",
         label = "Proporção para Treino (Holdout):",
@@ -116,33 +117,27 @@ server <- function(input, output, session) {
       stringsAsFactors = FALSE
     )
     
-    # Lista para armazenar modelos + data
+    # Lista para armazenar modelos + dados (para geração de gráficos e bootstrap de coef.)
     lista_modelos <- list()
     
-    set.seed(123)  # Para reprodutibilidade da partição
+    set.seed(123)  # Para reprodutibilidade
     
     for(s in lista_subst){
       df_sub <- subset(df, substancia == s)
       
-      # Cria índice de treino de acordo com o slider
-      n <- nrow(df_sub)
-      idx_treino <- sample(seq_len(n), size = floor(input$frac_treino * n))
-      
-      dados_treino <- df_sub[idx_treino, ]
-      dados_teste  <- df_sub[setdiff(seq_len(n), idx_treino), ]
-      
       for(mod_info in modelos){
         
-        # Se checkbox "robusto" estiver marcada, usamos lmrob; caso contrário, lm
-        ajuste <- tryCatch({
+        # Ajuste do modelo em TODO o conjunto (para obter p-valores, R2 etc.)
+        ajuste_completo <- tryCatch({
           if (input$robusto) {
-            lmrob(mod_info$formula, data = dados_treino)
+            lmrob(mod_info$formula, data = df_sub)
           } else {
-            lm(mod_info$formula, data = dados_treino)
+            lm(mod_info$formula, data = df_sub)
           }
         }, error = function(e) NULL)
         
-        if(is.null(ajuste)){
+        if(is.null(ajuste_completo)){
+          # Se não foi possível ajustar o modelo, preenchendo com NA
           new_line <- data.frame(
             substancia = s,
             modelo = mod_info$nome,
@@ -156,79 +151,110 @@ server <- function(input, output, session) {
             mad_holdout = NA,
             stringsAsFactors = FALSE
           )
-        } else {
           
-          # Verifica se é robusto ou não
-          is_robust <- inherits(ajuste, "lmrob")
-          
-          if (!is_robust) {
-            sum_mod <- summary(ajuste)
-            # Estatística F e p-valor
-            f_est <- sum_mod$fstatistic
-            p_valor_reg <- pf(f_est[1], f_est[2], f_est[3], lower.tail = FALSE)
-            # R2
-            r2_val <- sum_mod$r.squared
-          } else {
-            # Em lmrob, não há F-stat e r.squared do mesmo jeito
-            p_valor_reg <- NA
-            r2_val <- NA
-          }
-          
-          # Breusch-Pagan
-          bp_test <- tryCatch(bptest(ajuste), error = function(e) list(p.value=NA))
-          p_valor_bp <- bp_test$p.value
-          
-          # Shapiro-Wilk
-          sw_test <- tryCatch(shapiro.test(residuals(ajuste)), error = function(e) list(p.value=NA))
-          p_valor_sw <- sw_test$p.value
-          
-          # AIC e BIC
-          aic_val <- tryCatch(AIC(ajuste), error = function(e) NA)
-          bic_val <- tryCatch(BIC(ajuste), error = function(e) NA)
-          
-          # -----------------------
-          # Cálculo da performance no holdout
-          # -----------------------
-          if(nrow(dados_teste) > 0){
-            # Predições no conjunto de teste
-            pred_teste <- predict(ajuste, newdata = dados_teste)
-            obs_teste  <- dados_teste$y
-            
-            # RMSE Holdout
-            rmse_hold <- sqrt(mean((obs_teste - pred_teste)^2))
-            
-            # MAD Holdout
-            mad_hold <- mean(abs(obs_teste - pred_teste))
-            
-          } else {
-            rmse_hold <- NA
-            mad_hold <- NA
-          }
-          
-          new_line <- data.frame(
-            substancia = s,
-            modelo = mod_info$nome,
-            p_valor_regressao = p_valor_reg,
-            r2 = r2_val,
-            p_valor_breusch = p_valor_bp,
-            p_valor_shapiro = p_valor_sw,
-            AIC = aic_val,
-            BIC = bic_val,
-            rmse_holdout = rmse_hold,
-            mad_holdout = mad_hold,
-            stringsAsFactors = FALSE
-          )
-          
-          # Guardando o modelo e os dados para gerar gráficos e bootstrap
-          key_model <- paste(s, mod_info$nome, sep = "_")
-          lista_modelos[[key_model]] <- list(
-            model   = ajuste,
-            data    = df_sub,
-            formula = mod_info$formula
-          )
+          df_result <- rbind(df_result, new_line)
+          next
         }
         
+        # ----
+        # Extraindo métricas de todo o ajuste (F, p-valor, R2, AIC, BIC, Breusch, Shapiro)
+        # ----
+        is_robust <- inherits(ajuste_completo, "lmrob")
+        
+        if (!is_robust) {
+          sum_mod <- summary(ajuste_completo)
+          # Estatística F e p-valor
+          f_est <- sum_mod$fstatistic
+          p_valor_reg <- pf(f_est[1], f_est[2], f_est[3], lower.tail = FALSE)
+          # R2
+          r2_val <- sum_mod$r.squared
+        } else {
+          p_valor_reg <- NA
+          r2_val <- NA
+        }
+        
+        # Breusch-Pagan
+        bp_test <- tryCatch(bptest(ajuste_completo), error = function(e) list(p.value=NA))
+        p_valor_bp <- bp_test$p.value
+        
+        # Shapiro-Wilk
+        sw_test <- tryCatch(shapiro.test(residuals(ajuste_completo)), error = function(e) list(p.value=NA))
+        p_valor_sw <- sw_test$p.value
+        
+        # AIC e BIC
+        aic_val <- tryCatch(AIC(ajuste_completo), error = function(e) NA)
+        bic_val <- tryCatch(BIC(ajuste_completo), error = function(e) NA)
+        
+        # -----------------------
+        # Repetição do holdout (n = input$num_boot) para RMSE e MAD
+        # -----------------------
+        rmse_vec <- numeric(input$num_boot)
+        mad_vec  <- numeric(input$num_boot)
+        
+        for(i in seq_len(input$num_boot)){
+          # Gerando partição treino/teste para cada repetição
+          n <- nrow(df_sub)
+          idx_treino <- sample(seq_len(n), size = floor(input$frac_treino * n))
+          dados_treino <- df_sub[idx_treino, ]
+          dados_teste  <- df_sub[setdiff(seq_len(n), idx_treino), ]
+          
+          if (nrow(dados_teste) == 0) {
+            # Se por acaso não sobrou nada pro teste, ignoramos
+            rmse_vec[i] <- NA
+            mad_vec[i]  <- NA
+            next
+          }
+          
+          # Ajusta modelo (robusto ou não) nos dados de treino
+          ajuste_hold <- tryCatch({
+            if (input$robusto) {
+              lmrob(mod_info$formula, data = dados_treino)
+            } else {
+              lm(mod_info$formula, data = dados_treino)
+            }
+          }, error = function(e) NULL)
+          
+          if(is.null(ajuste_hold)){
+            rmse_vec[i] <- NA
+            mad_vec[i]  <- NA
+            next
+          }
+          
+          # Predição no teste
+          pred_teste <- predict(ajuste_hold, newdata = dados_teste)
+          obs_teste  <- dados_teste$y
+          
+          rmse_vec[i] <- sqrt(mean((obs_teste - pred_teste)^2))
+          mad_vec[i]  <- mean(abs(obs_teste - pred_teste))
+        }
+        
+        # Média dos valores de RMSE e MAD
+        rmse_hold <- mean(rmse_vec, na.rm = TRUE)
+        mad_hold  <- mean(mad_vec,  na.rm = TRUE)
+        
+        new_line <- data.frame(
+          substancia = s,
+          modelo = mod_info$nome,
+          p_valor_regressao = p_valor_reg,
+          r2 = r2_val,
+          p_valor_breusch = p_valor_bp,
+          p_valor_shapiro = p_valor_sw,
+          AIC = aic_val,
+          BIC = bic_val,
+          rmse_holdout = rmse_hold,
+          mad_holdout = mad_hold,
+          stringsAsFactors = FALSE
+        )
+        
         df_result <- rbind(df_result, new_line)
+        
+        # Guardamos o modelo e dados (para gráficos e bootstrap de coef.)
+        key_model <- paste(s, mod_info$nome, sep = "_")
+        lista_modelos[[key_model]] <- list(
+          model   = ajuste_completo,  # ajuste com TODOS os dados
+          data    = df_sub,
+          formula = mod_info$formula
+        )
       }
     }
     
