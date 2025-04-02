@@ -38,7 +38,7 @@ Este dashboard desenvolvido em R, com interface Shiny, facilita a realização d
   - `robustbase`
 
 ## Autores
-- Carlo
+- Carlo Ralph De Musis e Eguiberto Bernardes Fraga Júnior
 - Eguiberto
 
 **Última atualização:** 01/04/2025
