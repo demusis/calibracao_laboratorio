@@ -12,7 +12,14 @@ Este aplicativo Shiny foi desenvolvido para realizar **análises de regressão l
   - 1/y,
   - 1/y²;
 - **Opção de regressão robusta** (com o pacote `robustbase`);
-- **Validação via holdout repetido** com métricas como RMSE, MAD e erro relativo;
+- **Validação via holdout repetido (validação cruzada)**:
+  - Em cada repetição, os dados são divididos em treino e teste de forma aleatória;
+  - A proporção de dados para treino é definida pelo usuário;
+  - O processo se repete várias vezes (definido pelo número de repetições);
+  - Em cada repetição são calculadas as seguintes métricas:
+    - **RMSE (Root Mean Squared Error)**: raiz do erro quadrático médio,
+    - **MAD (Mean Absolute Deviation)**: desvio absoluto médio,
+    - **Erro Relativo Médio (%)** entre predições e observações;
 - **Testes estatísticos**:
   - p-valor da regressão,
   - R²,
