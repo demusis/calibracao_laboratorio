@@ -67,11 +67,9 @@ A planilha carregada deve conter obrigatoriamente as colunas:
 
 - **Carlo Ralph De Musis**  
   Perito Oficial Criminal - POLITEC/MT  
-  [GitHub](https://github.com/demusis)
 
 - **Eguiberto Bernardes Fraga Júnior**  
   Perito Oficial Criminal - POLITEC/MT  
-  Especialista em Estatística e Modelagem
 
 ---
 
