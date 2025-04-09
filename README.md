@@ -77,7 +77,3 @@ A planilha carregada deve conter obrigatoriamente as colunas:
 
 - **Eguiberto Bernardes Fraga Júnior**  
   Perito Oficial Criminal - POLITEC/MT  
-
----
-
-© 2025 - POLITEC/MT. Todos os direitos reservados.
