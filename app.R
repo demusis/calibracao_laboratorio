@@ -1,6 +1,6 @@
-# Painel para análise de regressão com transformações
+# Painel para análise de regressão com transformações (WLS)
 # Autores: Carlo Ralph De Musis e Eguiberto Bernardes Fraga Júnior
-# Data: 02/04/2025
+# Data: 09/04/2025 
 
 library(shiny)
 library(readxl)
@@ -13,7 +13,7 @@ library(boot)
 library(robustbase)  # para lmrob
 
 ui <- fluidPage(
-  titlePanel("Análises de Regressão com Transformações"),
+  titlePanel("POLITEC - Análises de Regressão por Mínimos Quadrados Ponderados"),
   
   sidebarLayout(
     
@@ -49,13 +49,25 @@ ui <- fluidPage(
         value = 0.7,
         step = 0.1
       ),
+      
       hr(),
       
-      downloadButton("download_csv", "Baixar Resultados (CSV)"),
-      downloadButton("download_excel", "Baixar Resultados (Excel)")
+      actionButton("sobre", "Sobre...")
+      
+      
+      # downloadButton("download_csv", "Baixar Resultados (CSV)"),
+      # downloadButton("download_excel", "Baixar Resultados (Excel)")
     ),
     
     mainPanel(
+      fluidRow(
+        column(12, align = "center",
+               downloadButton("download_csv", "Baixar Resultados (CSV)"),
+               downloadButton("download_excel", "Baixar Resultados (Excel)")
+        )
+      ),
+      hr(),
+      
       DTOutput("tabela_resultados"),
       hr(),
       
@@ -73,11 +85,25 @@ server <- function(input, output, session) {
   
   # Lista de modelos (transformações)
   modelos <- list(
-    list(nome = "y ~ x",         formula = y ~ x),
-    list(nome = "y ~ 1/x",       formula = y ~ I(1/x)),
-    list(nome = "y ~ 1/x^2",     formula = y ~ I(1/x^2)),
-    list(nome = "1/y ~ x",       formula = I(1/y) ~ x),
-    list(nome = "1/y^2 ~ x",     formula = I(1/y^2) ~ x)
+    list(nome = "1",
+         formula = y ~ x,
+         peso = function(d) rep(1, nrow(d))),          # w = 1
+    
+    list(nome = "1/x",
+         formula = y ~ x,
+         peso = function(d) 1 / (d$x)),                  # w = 1/x
+    
+    list(nome = "1/x^2",
+         formula = y ~ x,
+         peso = function(d) 1 / (d$x^2) ),                # w = 1/x²
+    
+    list(nome = "1/y",
+         formula = y ~ x,
+         peso = function(d) 1 / (d$y) ),                  # w = 1/y
+    
+    list(nome = "1/y^2",
+         formula = y ~ x,
+         peso = function(d) 1 / (d$y^2) )                 # w = 1/y²
   )
   
   # Reactive para a base
@@ -106,6 +132,8 @@ server <- function(input, output, session) {
     df_result <- data.frame(
       substancia = character(),
       modelo = character(),
+      coef_intercepto = numeric(),
+      coef_inclinacao = numeric(),
       p_valor_regressao = numeric(),
       r2 = numeric(),
       p_valor_breusch = numeric(),
@@ -114,25 +142,35 @@ server <- function(input, output, session) {
       BIC = numeric(),
       rmse_holdout = numeric(),
       mad_holdout = numeric(),
+      re_holdout = numeric(),
       stringsAsFactors = FALSE
-    )
+)
     
     # Lista para armazenar modelos + dados (para geração de gráficos e bootstrap de coef.)
     lista_modelos <- list()
     
-    set.seed(123)  # Para reprodutibilidade
+    set.seed(42)  # Para reprodutibilidade
     
     for(s in lista_subst){
       df_sub <- subset(df, substancia == s)
       
       for(mod_info in modelos){
         
+        
+        # ---------- Calcula o vetor de pesos -------------------------
+        w_vec <- tryCatch(mod_info$peso(df_sub), error = function(e) NULL)
+        if (is.null(w_vec) || any(!is.finite(w_vec))) {
+          warning("Pesos inválidos para ", mod_info$nome)
+          next
+        }
+        # ---------------------------------------------------------------
+
         # Ajuste do modelo em TODO o conjunto (para obter p-valores, R2 etc.)
         ajuste_completo <- tryCatch({
           if (input$robusto) {
-            lmrob(mod_info$formula, data = df_sub)
+            lmrob(y ~ x, data = df_sub, weights = w_vec)
           } else {
-            lm(mod_info$formula, data = df_sub)
+            lm(y ~ x, data = df_sub, weights = w_vec)
           }
         }, error = function(e) NULL)
         
@@ -141,6 +179,8 @@ server <- function(input, output, session) {
           new_line <- data.frame(
             substancia = s,
             modelo = mod_info$nome,
+            coef_intercepto = NA,
+            coef_inclinacao = NA,
             p_valor_regressao = NA,
             r2 = NA,
             p_valor_breusch = NA,
@@ -149,6 +189,7 @@ server <- function(input, output, session) {
             BIC = NA,
             rmse_holdout = NA,
             mad_holdout = NA,
+            re_holdout = NA,
             stringsAsFactors = FALSE
           )
           
@@ -168,9 +209,20 @@ server <- function(input, output, session) {
           p_valor_reg <- pf(f_est[1], f_est[2], f_est[3], lower.tail = FALSE)
           # R2
           r2_val <- sum_mod$r.squared
+          
+          coefs <- tryCatch(coef(ajuste_completo), error = function(e) NULL)
+          if (!is.null(coefs) && length(coefs) >= 2) {
+            intercepto <- coefs[1]
+            inclinacao <- coefs[2]
+          }  
+            
         } else {
+          
           p_valor_reg <- NA
           r2_val <- NA
+          
+          intercepto <- NA
+          inclinacao <- NA
         }
         
         # Breusch-Pagan
@@ -190,8 +242,9 @@ server <- function(input, output, session) {
         # -----------------------
         rmse_vec <- numeric(input$num_boot)
         mad_vec  <- numeric(input$num_boot)
+        re_vec  <- numeric(input$num_boot)
         
-        for(i in seq_len(input$num_boot)){
+         for(i in seq_len(input$num_boot)){
           # Gerando partição treino/teste para cada repetição
           n <- nrow(df_sub)
           idx_treino <- sample(seq_len(n), size = floor(input$frac_treino * n))
@@ -202,21 +255,27 @@ server <- function(input, output, session) {
             # Se por acaso não sobrou nada pro teste, ignoramos
             rmse_vec[i] <- NA
             mad_vec[i]  <- NA
+            re_vec[i]  <- NA
             next
           }
+          
+          w_train <- mod_info$peso(dados_treino)
+          w_test  <- mod_info$peso(dados_teste)
           
           # Ajusta modelo (robusto ou não) nos dados de treino
           ajuste_hold <- tryCatch({
             if (input$robusto) {
-              lmrob(mod_info$formula, data = dados_treino)
+              # lmrob(mod_info$formula, data = dados_treino, weights = mod_info$peso(dados_treino))
+              lmrob(y ~ x, data = dados_treino, weights = mod_info$peso(dados_treino))
             } else {
-              lm(mod_info$formula, data = dados_treino)
+              lm(y ~ x, data = dados_treino, weights = mod_info$peso(dados_treino))
             }
           }, error = function(e) NULL)
           
           if(is.null(ajuste_hold)){
             rmse_vec[i] <- NA
             mad_vec[i]  <- NA
+            re_vec[i]  <- NA
             next
           }
           
@@ -226,15 +285,19 @@ server <- function(input, output, session) {
           
           rmse_vec[i] <- sqrt(mean((obs_teste - pred_teste)^2))
           mad_vec[i]  <- mean(abs(obs_teste - pred_teste))
+          re_vec <- sum(abs((pred_teste - obs_teste)/obs_teste)*100)
         }
         
-        # Média dos valores de RMSE e MAD
+        # Média dos valores de RMSE, MAD e RE
         rmse_hold <- mean(rmse_vec, na.rm = TRUE)
         mad_hold  <- mean(mad_vec,  na.rm = TRUE)
+        re_hold   <- mean(re_vec,  na.rm = TRUE)
         
         new_line <- data.frame(
           substancia = s,
           modelo = mod_info$nome,
+          coef_intercepto = intercepto,
+          coef_inclinacao = inclinacao,
           p_valor_regressao = p_valor_reg,
           r2 = r2_val,
           p_valor_breusch = p_valor_bp,
@@ -243,6 +306,7 @@ server <- function(input, output, session) {
           BIC = bic_val,
           rmse_holdout = rmse_hold,
           mad_holdout = mad_hold,
+          re_holdout = re_hold,
           stringsAsFactors = FALSE
         )
         
@@ -279,9 +343,10 @@ server <- function(input, output, session) {
       selection = "single",
       options = list(pageLength = 10)
     ) %>%
-      formatSignif(columns = c("p_valor_regressao","r2","p_valor_breusch",
+      formatSignif(columns = c("coef_intercepto", "coef_inclinacao",
+                               "p_valor_regressao","r2","p_valor_breusch",
                                "p_valor_shapiro","AIC","BIC",
-                               "rmse_holdout","mad_holdout"),
+                               "rmse_holdout","mad_holdout", "re_holdout"),
                    digits = 7)
   })
   
@@ -334,89 +399,52 @@ server <- function(input, output, session) {
       return(NULL)
     }
     
+
+    # --- Antes de renderizar o gráfico ---
     mod <- pack$model
     df_sub <- pack$data
     form_mod <- pack$formula
     
-    # ==============
-    # 1) Bootstrap dos coeficientes (usando input$num_boot)
-    # ==============
-    boot_fn <- function(data, indices){
-      d <- data[indices, ]
-      if (input$robusto) {
-        fit <- lmrob(form_mod, data = d)
-      } else {
-        fit <- lm(form_mod, data = d)
-      }
-      coef(fit)
-    }
+    # Filtra valores válidos
+    df_mod_filtrado <- df_sub %>%
+      filter(!is.na(x) & !is.na(y) & is.finite(x) & is.finite(y))
     
-    R_boot <- input$num_boot
-    
-    set.seed(123)
-    bs_results <- tryCatch({
-      boot(data = df_sub, statistic = boot_fn, R = R_boot)
+    # Gera predições com intervalos de confiança
+    preds <- tryCatch({
+      predict(mod, newdata = df_mod_filtrado, interval = "confidence")
     }, error = function(e) NULL)
     
-    if(is.null(bs_results)){
-      tabela_coefs(data.frame())
-      output$plot_regressao <- renderPlot({})
-      output$plot_residuos <- renderPlot({})
-      output$plot_scale_location <- renderPlot({})
-      return(NULL)
-    }
-    
-    coefs_orig <- coef(mod)
-    ic_lower <- apply(bs_results$t, 2, quantile, probs = 0.025, na.rm = TRUE)
-    ic_upper <- apply(bs_results$t, 2, quantile, probs = 0.975, na.rm = TRUE)
-    
-    df_coefs <- data.frame(
-      Coeficiente = names(coefs_orig),
-      Estimativa  = unname(coefs_orig),
-      IC2.5       = ic_lower,
-      IC97.5      = ic_upper,
-      row.names   = NULL
-    )
-    
-    tabela_coefs(df_coefs)
-    
-    # ==============
-    # 2) Gera plots
-    # ==============
-    df_mod <- model.frame(mod)
-    
-    # Para evitar problemas se existirem Inf/NA, filtramos
-    df_mod_filtrado <- df_mod %>%
-      filter_all(all_vars(!is.na(.))) %>%
-      filter_all(all_vars(!is.infinite(.)))
-    
-    # Plot Regressão
+    # --- Gráfico de Regressão ---
     output$plot_regressao <- renderPlot({
-      if (nrow(df_mod_filtrado) == 0) {
+      if (nrow(df_mod_filtrado) == 0 || is.null(preds)) {
         plot.new()
-        title("Nenhum ponto disponível após transformações")
+        title("Nenhum ponto disponível ou erro na predição.")
         return(NULL)
       }
       
-      var_dep_name <- names(df_mod_filtrado)[1]
-      var_ind_name <- names(df_mod_filtrado)[2]
+      df_plot <- df_mod_filtrado
+      df_plot$fit <- preds[, "fit"]
+      df_plot$lwr <- preds[, "lwr"]
+      df_plot$upr <- preds[, "upr"]
       
-      df_plot <- data.frame(
-        dep   = df_mod_filtrado[[var_dep_name]],
-        indep = df_mod_filtrado[[var_ind_name]]
-      )
-      
-      gg <- ggplot(df_plot, aes(x = indep, y = dep)) +
+      gg <- ggplot(df_plot, aes(x = x, y = y)) +
         geom_point() +
-        geom_smooth(method = "lm", formula = y ~ x) +
+        geom_line(aes(y = fit), color = "blue", linewidth = 1) +
+        geom_ribbon(aes(ymin = lwr, ymax = upr), alpha = 0.2) +
         labs(
-          x = var_ind_name,
-          y = var_dep_name,
-          title = paste0("Ajuste: ", modelo_sel, " (subst.: ", subst_sel, ")",
+          x = "x",
+          y = "y",
+          title = paste0("Ponderador dos resíduos: ", modelo_sel, " (subst.: ", subst_sel, ")",
                          if (input$robusto) " [Robusto]" else " [Clássico]")
         )
+      
       print(gg)
     })
+    
+    
+    
+    
+    
     
     # Plot Resíduos vs Fitted
     output$plot_residuos <- renderPlot({
@@ -436,9 +464,9 @@ server <- function(input, output, session) {
         geom_point() +
         geom_hline(yintercept = 0, linetype = "dashed") +
         labs(
-          x = "Fitted Values",
+          x = "Valores estimados",
           y = "Resíduos",
-          title = paste("Resíduos vs. Fitted", 
+          title = paste("Resíduos vs. Valores estimados", 
                         if (input$robusto) "(Robusto)" else "(Clássico)")
         )
       print(gg_res)
@@ -464,9 +492,9 @@ server <- function(input, output, session) {
         geom_point() +
         geom_smooth(method="loess", formula = y ~ x, se=FALSE) +
         labs(
-          x = "Fitted Values",
+          x = "Valores estimados",
           y = expression(sqrt("|Resíduo|")),
-          title = paste("Scale-Location Plot",
+          title = paste("Escala-locação",
                         if (input$robusto) "(Robusto)" else "(Clássico)")
         )
       print(gg_sc)
@@ -487,6 +515,34 @@ server <- function(input, output, session) {
     })
     df_show
   })
-}
+
+  observeEvent(input$sobre, {
+    showModal(modalDialog(
+      title = "Sobre este aplicativo",
+      HTML("
+      <p><strong>Perícia Oficial e Identificação Técnica do Estado de Mato Grosso</strong><br>
+      Análises de Regressão por Mínimos Quadrados Ponderados</p>
+      
+      <p><strong>Autores:</strong> Carlo Ralph De Musis e Eguiberto Bernardes Fraga Júnior<br>
+      <strong>Data:</strong> 09/04/2025</p>
+      
+      <p><strong>Repositório:</strong><br>
+      <a href='https://github.com/demusis/calibracao_laboratorio' target='_blank'>
+      https://github.com/demusis/calibracao_laboratorio</a></p>
+    "),
+      easyClose = TRUE,
+      footer = modalButton("Fechar")
+    ))
+  })
+  
+  }
+
+
+
+
+
+
+
+
 
 shinyApp(ui = ui, server = server)
